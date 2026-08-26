@@ -2610,7 +2610,7 @@ TZ_OFFSET_HOURS = float(os.environ.get("TZ_OFFSET_HOURS", "6"))  # বাংল�
 
 def now_local():
     """Server যেখানেই থাকুক (Render=UTC), সবসময় বাংলাদেশ সময়।"""
-    return datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS)
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(hours=TZ_OFFSET_HOURS)
 
 REMINDERS_FILE = MEMORY_DIR / "reminders.json"
 
@@ -3442,7 +3442,7 @@ header {
 .gbtn:active { transform:scale(.95); }
 
 /* ══════════ SHELL: SIDEBAR + MAIN ══════════ */
-#shell { position:relative; z-index:1; flex:1; display:flex; min-height:0; }
+#shell { position:relative; flex:1; display:flex; min-height:0; }
 
 #sidebar {
   width:190px; flex-shrink:0; padding:14px 10px;
