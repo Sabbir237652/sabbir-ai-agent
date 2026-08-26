@@ -21,6 +21,7 @@
 
 Terminal-এ chat করতে চাইলে:  python sabbir_ai_agent.py --terminal
 """
+import ast
 import base64
 import datetime
 import html
@@ -84,9 +85,9 @@ BRAND = {
 
     # ── Brand Colors (gradient-এর ৩টা রঙ, hex code) ──
     # রঙ বদলাতে চাইলে: https://htmlcolorcodes.com থেকে পছন্দের hex নিন
-    "color1": "#6366f1",   # Indigo
-    "color2": "#8b5cf6",   # Purple
-    "color3": "#ec4899",   # Pink
+    "color1": "#7c3aed",   # Violet
+    "color2": "#a78bfa",   # Light violet
+    "color3": "#6366f1",   # Indigo
 
     # ── Personality (agent-এর চরিত্র — যা ইচ্ছা লিখুন) ──
     "personality": (
@@ -140,6 +141,7 @@ def build_system_prompt():
 তোমার কথা বলার ধরন: {BRAND['tone']}
 তোমার উত্তরের style: {BRAND['response_style']}
 
+এখন তারিখ-সময়: {now_local().strftime("%Y-%m-%d %H:%M")} (বাংলাদেশ)। User সময় দিয়ে কিছু মনে করাতে বললে reminder_tool দিয়ে set করো।
 তুমি বাংলা ও ইংরেজি দুই ভাষাতেই কথা বলতে পারো — user যে ভাষায় লেখে সেই ভাষায় উত্তর দাও।
 তোমার কাছে কিছু tool আছে। যখন কোনো কাজের জন্য tool দরকার হয়, তখন tool ব্যবহার করো।
 Tool-এর ফলাফল পাওয়ার পর user-কে সুন্দরভাবে উত্তর দাও।
@@ -160,6 +162,12 @@ Tool-এর ফলাফল পাওয়ার পর user-কে সুন�
 - তারপর এক এক করে ধাপ execute করো, প্রতিটি ধাপ শেষে complete_step দিয়ে টিক দাও।
 - সব ধাপ শেষ হলে user-কে গুছিয়ে চূড়ান্ত ফলাফল দাও।
 - সহজ প্রশ্নে (যেমন: সাধারণ কথা, একটামাত্র হিসাব) plan বানানোর দরকার নেই — সরাসরি উত্তর দাও।
+
+নতুন feature চাইলে (Self-building):
+- User নতুন feature/ক্ষমতা চাইলে আগে ভাবো: এটা কি একটা ছোট Python function দিয়ে করা যায়?
+- গেলে: create_plugin দিয়ে নিজেই feature-টা বানিয়ে ফেলো, তারপর test করে দেখাও।
+- API key/টাকা/বাইরের service লাগলে: বানিও না — বরং ধাপে ধাপে গাইড দাও (কোথায় account, কী key, কোথায় বসাবে) — ঠিক একজন শিক্ষকের মতো।
+- জটিল বড় feature হলে: সৎভাবে বলো এটা developer দিয়ে করাতে হবে, আর কী কী লাগবে তার তালিকা দাও।
 
 Autonomous workflow-এর নিয়ম:
 - বড় কাজ পেলে: তথ্য সংগ্রহ → plan → ধাপে ধাপে execute → ফলাফল যাচাই → ভুলে retry → শেষে report।
@@ -559,7 +567,7 @@ def calculator(expression: str) -> str:
 
 
 def get_current_time() -> str:
-    return datetime.datetime.now().strftime("তারিখ: %Y-%m-%d, সময়: %H:%M:%S")
+    return now_local().strftime("তারিখ: %Y-%m-%d, সময়: %H:%M:%S") + " (বাংলাদেশ)"
 
 
 def save_note(filename: str, content: str) -> str:
@@ -768,6 +776,8 @@ def llm_chat(messages, tools=None):
             try:
                 resp = requests.post(url, params={"key": GEMINI_API_KEY},
                                      json=payload, timeout=120)
+            except requests.Timeout:
+                raise LLMError("⏳ Google-এর server-এ ভিড় (timeout)। সম্ভবত আজকের ফ্রি কোটা শেষ বা সাময়িক সমস্যা — কয়েক মিনিট পরে আবার চেষ্টা করুন।")
             except requests.RequestException as e:
                 raise LLMError(f"Network error: {e}")
             if resp.status_code == 200:
@@ -1476,6 +1486,12 @@ def backup_bundle():
                      ("products", "customers", "orders", "tickets", "finance")},
         "watchlist": _watch_load(),
         "team": _team_load(),
+        "config": _custom_load(),
+        "reminders": _rem_load(),
+        "plugins": {f.stem: {"code": f.read_text(encoding="utf-8"),
+                             "meta": (PLUGINS_DIR / (f.stem + ".json")).read_text(encoding="utf-8")
+                                     if (PLUGINS_DIR / (f.stem + ".json")).exists() else "{}"}
+                    for f in PLUGINS_DIR.glob("*.py")},
     }
 
 def restore_bundle(data):
@@ -1502,6 +1518,17 @@ def restore_bundle(data):
         _watch_save(data["watchlist"])
     if isinstance(data.get("team"), list):
         _team_save(data["team"])
+    if isinstance(data.get("config"), dict):
+        _custom_save(data["config"])
+    if isinstance(data.get("reminders"), list):
+        _rem_save(data["reminders"])
+    if isinstance(data.get("plugins"), dict):
+        for pname, pdata in data["plugins"].items():
+            safe = re.sub(r"[^a-z0-9_]", "", str(pname).lower())
+            if safe and isinstance(pdata, dict) and pdata.get("code"):
+                (PLUGINS_DIR / f"{safe}.py").write_text(str(pdata["code"]), encoding="utf-8")
+                (PLUGINS_DIR / f"{safe}.json").write_text(str(pdata.get("meta", "{}")), encoding="utf-8")
+        load_plugins()
     if isinstance(data.get("business"), dict):
         for bname, bdata in data["business"].items():
             if isinstance(bdata, list) and bname in ("products", "customers", "orders", "tickets", "finance"):
@@ -1546,6 +1573,8 @@ def command_extra():
     if not get_perms().get("web", True):
         alerts.append("🛡️ Web permission বন্ধ আছে")
     _w = _watch_load()
+    for _r in [r for r in _rem_load() if not r.get("notified")][:3]:
+        alerts.append(f"⏰ {_r['when'][5:]} — {_r['text'][:30]}")
     _stale = [w for w in _w if not w.get("last_checked")
               or w["last_checked"][:10] < datetime.date.today().isoformat()]
     if _stale:
@@ -2011,7 +2040,7 @@ def integrations_status():
     out = []
     for key, cfg in INTEGRATIONS.items():
         configured = bool(os.environ.get(cfg["env"], ""))
-        out.append({"key": key, "label": cfg["label"],
+        out.append({"key": key, "label": cfg["label"], "env": cfg["env"],
                     "configured": configured, "note": cfg["note"]})
     return out
 
@@ -2069,7 +2098,7 @@ def _keys_load():
 
 def save_runtime_key(env_name, value):
     """API key নিরাপদে save (শুধু server-side; UI-তে কখনো ফেরত যায় না)।"""
-    allowed = {p["env"] for p in PROVIDERS.values()} | {i["env"] for i in INTEGRATIONS.values()}
+    allowed = {p["env"] for p in get_all_providers().values()} | {i["env"] for i in INTEGRATIONS.values()}
     if env_name not in allowed:
         return False
     keys = _keys_load()
@@ -2094,12 +2123,54 @@ if isinstance(_cfg.get("brand"), dict):
         if _bk in BRAND:
             BRAND[_bk] = _bv
 
+
+def get_all_providers():
+    """Built-in + user-এর যোগ করা custom provider সব একসাথে।"""
+    provs = dict(PROVIDERS)
+    cfg = _custom_load()
+    for cp in cfg.get("custom_providers", []):
+        key = cp.get("key")
+        if key and key not in provs and cp.get("base") and cp.get("env"):
+            provs[key] = {"label": cp.get("label", key), "env": cp["env"], "type": "openai",
+                          "base": cp["base"], "models": cp.get("models", ["default"]),
+                          "note": "আপনার যোগ করা custom provider", "custom": True}
+    return provs
+
+def admin_add_provider(label, base, model):
+    """নতুন AI provider যোগ (ভবিষ্যতের ChatGPT-6/Claude-5/যেকোনো OpenAI-compatible API)।"""
+    label = str(label).strip()[:40]
+    base = str(base).strip().rstrip("/")
+    model = str(model).strip()[:80]
+    if not label or not model or not base.startswith("http"):
+        return False
+    slug = re.sub(r"[^a-z0-9]", "", label.lower())[:16] or "provider"
+    key = "custom_" + slug
+    env = "CUSTOM_" + slug.upper() + "_KEY"
+    cfg = _custom_load()
+    cps = [p for p in cfg.get("custom_providers", []) if p.get("key") != key]
+    cps.append({"key": key, "label": label, "base": base, "models": [model], "env": env})
+    cfg["custom_providers"] = cps[:10]  # সর্বোচ্চ ১০টা custom
+    _custom_save(cfg)
+    log_activity("admin", f"নতুন AI provider: {label}")
+    return True
+
+def admin_remove_provider(key):
+    cfg = _custom_load()
+    cfg["custom_providers"] = [p for p in cfg.get("custom_providers", []) if p.get("key") != key]
+    if cfg.get("provider") == key:
+        cfg["provider"] = "gemini"
+        cfg.pop("model", None)
+    _custom_save(cfg)
+    log_activity("admin", f"provider মুছে ফেলা: {key}")
+    return True
+
 def get_engine():
     cfg = _custom_load()
     provider = cfg.get("provider", "gemini")
-    if provider not in PROVIDERS:
+    _all = get_all_providers()
+    if provider not in _all:
         provider = "gemini"
-    model = cfg.get("model") or (MODEL_NAME if provider == "gemini" else PROVIDERS[provider]["models"][0])
+    model = cfg.get("model") or (MODEL_NAME if provider == "gemini" else _all[provider]["models"][0])
     return {"provider": provider, "model": model}
 
 def get_max_iters():
@@ -2113,10 +2184,11 @@ def get_max_iters():
 def admin_get():
     eng = get_engine()
     provs = []
-    for key, p in PROVIDERS.items():
+    for key, p in get_all_providers().items():
         provs.append({"key": key, "label": p["label"], "models": p["models"],
                       "configured": bool(os.environ.get(p["env"], "")),
                       "env": p["env"], "note": p["note"],
+                      "custom": p.get("custom", False),
                       "active": key == eng["provider"]})
     return {"brand": {k: BRAND[k] for k in BRAND},
             "engine": eng, "providers": provs,
@@ -2151,11 +2223,12 @@ def admin_reset_brand():
     return True
 
 def admin_set_engine(provider, model):
-    if provider not in PROVIDERS:
+    _all = get_all_providers()
+    if provider not in _all:
         return False
     cfg = _custom_load()
     cfg["provider"] = provider
-    cfg["model"] = str(model or "").strip() or PROVIDERS[provider]["models"][0]
+    cfg["model"] = str(model or "").strip()[:80] or _all[provider]["models"][0]
     _custom_save(cfg)
     log_activity("admin", f"AI engine: {provider} / {cfg['model']}")
     return True
@@ -2174,7 +2247,7 @@ def admin_set_system(max_iterations=None):
 # ── OpenAI-compatible adapter (Groq/OpenAI/OpenRouter/DeepSeek) — BETA ──
 def _openai_chat(messages, tools=None):
     eng = get_engine()
-    p = PROVIDERS[eng["provider"]]
+    p = get_all_providers()[eng["provider"]]
     key = os.environ.get(p["env"], "")
     if not key:
         raise LLMError(f"{p['label']} এর API key নেই! Admin (🔧) → API Keys-এ key বসান, "
@@ -2528,6 +2601,614 @@ SENSITIVE_TOOLS.add("run_shell")
 SENSITIVE_TOOLS.add("file_manager")
 
 
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  ⏰ REMINDER SYSTEM — সময়মতো notification দিয়ে মনে করায়       ║
+# ╚═══════════════════════════════════════════════════════════════╝
+TZ_OFFSET_HOURS = float(os.environ.get("TZ_OFFSET_HOURS", "6"))  # বাংলাদেশ = UTC+6
+
+def now_local():
+    """Server যেখানেই থাকুক (Render=UTC), সবসময় বাংলাদেশ সময়।"""
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=TZ_OFFSET_HOURS)
+
+REMINDERS_FILE = MEMORY_DIR / "reminders.json"
+
+def _rem_load():
+    if REMINDERS_FILE.exists():
+        try:
+            return json.loads(REMINDERS_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+    return []
+
+def _rem_save(items):
+    REMINDERS_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+
+def reminder_tool(action, text="", when="", number=None):
+    """Reminder: add / list / delete।"""
+    items = _rem_load()
+    action = (action or "list").lower()
+    if action == "add":
+        if not text.strip():
+            return "Error: কী মনে করাতে হবে সেটা দরকার।"
+        try:
+            dt = datetime.datetime.strptime(when.strip(), "%Y-%m-%d %H:%M")
+        except (ValueError, AttributeError):
+            return ("Error: when অবশ্যই 'YYYY-MM-DD HH:MM' format-এ দিতে হবে (24-ঘণ্টা)। "
+                    f"এখন সময়: {now_local().strftime('%Y-%m-%d %H:%M')}")
+        if dt <= now_local():
+            return f"Error: সময়টা অতীতের! এখন {now_local().strftime('%Y-%m-%d %H:%M')} — ভবিষ্যতের সময় দাও।"
+        items.append({"text": text.strip()[:200], "when": dt.strftime("%Y-%m-%d %H:%M"),
+                      "notified": False, "created": now_local().strftime("%Y-%m-%d %H:%M")})
+        items.sort(key=lambda r: r["when"])
+        _rem_save(items[:50])
+        log_activity("reminder", f"set: {when} — {text[:40]}")
+        return (f"⏰ Reminder set হলো!\n📌 {text.strip()}\n🕐 {dt.strftime('%d/%m/%Y %H:%M')} "
+                f"(বাংলাদেশ সময়)\nসময় হলেই notification দিয়ে মনে করিয়ে দেবো। "
+                f"(⚠️ app-টা browser-এ খোলা থাকতে হবে)")
+    if action == "delete":
+        try:
+            i = int(number) - 1
+        except (TypeError, ValueError):
+            return "Error: কত নম্বর reminder মুছবো সেটা দরকার।"
+        active = [r for r in items if not r.get("notified")]
+        if not (0 <= i < len(active)):
+            return f"{number} নম্বর reminder নেই। মোট active: {len(active)}টা।"
+        target = active[i]
+        items.remove(target)
+        _rem_save(items)
+        return f"🗑️ মুছে ফেলা হলো: {target['text'][:50]}"
+    # list
+    active = [r for r in items if not r.get("notified")]
+    if not active:
+        return "কোনো active reminder নেই। 'add' দিয়ে সেট করুন।"
+    return f"⏰ Active reminders ({len(active)}টা):\n" + "\n".join(
+        f"{i+1}. 🕐 {r['when']} — {r['text']}" for i, r in enumerate(active))
+
+def due_reminders():
+    """যেসব reminder-এর সময় হয়ে গেছে — ফেরত দেয় ও notified মার্ক করে।"""
+    items = _rem_load()
+    now_str = now_local().strftime("%Y-%m-%d %H:%M")
+    due = [r for r in items if not r.get("notified") and r["when"] <= now_str]
+    if due:
+        for r in due:
+            r["notified"] = True
+            log_activity("reminder", f"🔔 fired: {r['text'][:40]}")
+        _rem_save(items)
+    return due
+
+TOOLS.update({
+    "reminder_tool": {"func": reminder_tool, "declaration": _decl(
+        "reminder_tool",
+        "Reminder set/list/delete করে। User 'মনে করিয়ে দিও' বললে: action='add', text=কী মনে করাতে হবে, "
+        "when='YYYY-MM-DD HH:MM' (24-ঘণ্টা, বাংলাদেশ সময়)। System prompt-এ এখনকার তারিখ-সময় দেওয়া আছে — "
+        "'কালকে ১টা' মানে আগামীকালের 13:00 হিসাব করে দাও।",
+        {"action": {"type": "string", "description": "add / list / delete"},
+         "text": {"type": "string", "description": "কী মনে করাতে হবে"},
+         "when": {"type": "string", "description": "YYYY-MM-DD HH:MM"},
+         "number": {"type": "integer", "description": "delete-এর জন্য কত নম্বর"}},
+        ["action"])},
+})
+TOOL_PERMISSION["reminder_tool"] = "memory"
+
+
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  🧬 SELF-BUILDING — agent নিজেই নতুন tool/feature বানায়        ║
+# ╚═══════════════════════════════════════════════════════════════╝
+PLUGINS_DIR = Path(__file__).parent / "plugins"
+PLUGINS_DIR.mkdir(exist_ok=True)
+
+def _plugin_env():
+    """Plugin-এর ভেতরে যা যা ব্যবহার করা যাবে।"""
+    return {
+        "requests": requests, "json": json, "re": re, "math": math,
+        "datetime": datetime, "Path": Path, "os": os, "base64": base64,
+        "now_local": now_local, "SANDBOX": SANDBOX, "WORKSPACE": WORKSPACE,
+        "log_activity": log_activity, "web_search": web_search,
+        "fetch_webpage": fetch_webpage, "_biz_load": _biz_load, "_biz_save": _biz_save,
+    }
+
+def _validate_plugin_code(code):
+    """Plugin code নিরাপদ ও সঠিক কিনা যাচাই। ফেরত: (fn_name, error)।"""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return None, f"Python syntax ভুল: {e}"
+    fns = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    if len(fns) != 1 or len(tree.body) != 1:
+        return None, "ঠিক ১টা function definition দাও (আর কিছু না — import-ও না, সব আগে থেকে দেওয়া আছে)।"
+    banned = {"exec", "eval", "compile", "__import__", "open"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in banned:
+            return None, f"'{node.id}' plugin-এ ব্যবহার করা যাবে না। ফাইল লিখতে SANDBOX/WORKSPACE Path ব্যবহার করো (write_text/read_text)।"
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return None, "import করা যাবে না — requests/json/re/math/datetime/Path আগে থেকেই আছে।"
+    name = fns[0].name
+    if not re.match(r"^[a-z][a-z0-9_]{2,30}$", name):
+        return None, "Function-এর নাম ছোট হাতের english + underscore হতে হবে।"
+    if name in TOOLS and not (PLUGINS_DIR / f"{name}.py").exists():
+        return None, f"'{name}' নামে built-in tool আগে থেকেই আছে — অন্য নাম দাও।"
+    return name, None
+
+def _register_plugin(fn_name, code, description, params=None):
+    """Code চালিয়ে function বের করে TOOLS-এ register করে।"""
+    env = _plugin_env()
+    exec(compile(code, f"<plugin:{fn_name}>", "exec"), env)  # validated code only
+    fn = env[fn_name]
+    props = {}
+    required = []
+    if isinstance(params, dict):
+        for pname, pdesc in list(params.items())[:6]:
+            props[str(pname)] = {"type": "string", "description": str(pdesc)[:120]}
+            required.append(str(pname))
+    def safe_wrapper(**kwargs):
+        try:
+            return str(fn(**kwargs))[:4000]
+        except Exception as e:
+            return f"Plugin error ({fn_name}): {e}"
+    TOOLS[fn_name] = {"func": safe_wrapper, "declaration": _decl(
+        fn_name, (description or fn_name)[:250], props, required or None)}
+    TOOL_PERMISSION[fn_name] = "code"
+
+def create_plugin(name_description, code, params_json=""):
+    """নতুন tool/feature বানিয়ে agent-এর মধ্যে স্থায়ীভাবে যোগ করে।"""
+    if not code.strip():
+        return "Error: Python function code দরকার।"
+    params = None
+    if params_json and params_json.strip():
+        try:
+            params = json.loads(params_json)
+        except json.JSONDecodeError:
+            return 'Error: params_json সঠিক JSON না। format: {"param_name": "কী কাজে লাগে"}'
+    fn_name, err = _validate_plugin_code(code)
+    if err:
+        return f"⛔ Plugin বানানো গেল না: {err}"
+    try:
+        _register_plugin(fn_name, code, name_description, params)
+    except Exception as e:
+        return f"⛔ Plugin চালু করতে সমস্যা: {e}"
+    meta = {"description": (name_description or "")[:250], "params": params or {},
+            "created": now_local().strftime("%Y-%m-%d %H:%M")}
+    (PLUGINS_DIR / f"{fn_name}.py").write_text(code, encoding="utf-8")
+    (PLUGINS_DIR / f"{fn_name}.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    log_activity("plugin", f"নতুন feature: {fn_name}")
+    return (f"🧬 নতুন feature যোগ হয়ে গেছে!\n🔧 Tool: {fn_name}\n📝 {meta['description'][:80]}\n"
+            f"এখন থেকে এই tool ব্যবহার করা যাবে (restart-এও থাকবে)। "
+            f"Test করতে: user-কে বলো tool-টা চালিয়ে দেখাতে।")
+
+def list_plugins():
+    files = sorted(PLUGINS_DIR.glob("*.py"))
+    if not files:
+        return ("কোনো custom plugin নেই। user নতুন feature চাইলে create_plugin দিয়ে বানাও, "
+                "বা জটিল হলে ধাপে ধাপে গাইড করো।")
+    out = []
+    for f in files:
+        meta = {}
+        mf = PLUGINS_DIR / (f.stem + ".json")
+        if mf.exists():
+            try:
+                meta = json.loads(mf.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+        out.append(f"• {f.stem} — {meta.get('description','')[:60]} ({meta.get('created','')})")
+    return f"🧬 Custom plugins ({len(files)}টা):\n" + "\n".join(out)
+
+def delete_plugin(name):
+    safe = re.sub(r"[^a-z0-9_]", "", str(name).lower())
+    pf = PLUGINS_DIR / f"{safe}.py"
+    if not pf.exists():
+        return f"'{name}' নামে plugin নেই। list_plugins দিয়ে দেখো।"
+    pf.unlink()
+    (PLUGINS_DIR / f"{safe}.json").unlink(missing_ok=True)
+    TOOLS.pop(safe, None)
+    log_activity("plugin", f"plugin মুছে ফেলা: {safe}")
+    return f"🗑️ Plugin '{safe}' মুছে ফেলা হলো।"
+
+def load_plugins():
+    """Startup-এ save করা সব plugin আবার চালু করে।"""
+    loaded = 0
+    for f in sorted(PLUGINS_DIR.glob("*.py")):
+        try:
+            code = f.read_text(encoding="utf-8")
+            fn_name, err = _validate_plugin_code(code)
+            if err or fn_name != f.stem:
+                continue
+            meta = {}
+            mf = PLUGINS_DIR / (f.stem + ".json")
+            if mf.exists():
+                try:
+                    meta = json.loads(mf.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    pass
+            _register_plugin(fn_name, code, meta.get("description", fn_name), meta.get("params"))
+            loaded += 1
+        except Exception:
+            continue
+    return loaded
+
+TOOLS.update({
+    "create_plugin": {"func": create_plugin, "declaration": _decl(
+        "create_plugin",
+        "নিজের মধ্যে নতুন tool/feature স্থায়ীভাবে যোগ করে! User নতুন feature চাইলে: "
+        "১টা Python function লেখো (import ছাড়া — requests/json/re/math/datetime/Path/web_search আগে থেকেই আছে), "
+        "সব parameter string ও default value সহ। code-এ শুধু function-টাই থাকবে। "
+        "params_json-এ parameter-দের বর্ণনা দাও।",
+        {"name_description": {"type": "string", "description": "feature-টা কী করে (বাংলায়)"},
+         "code": {"type": "string", "description": "সম্পূর্ণ Python function (def দিয়ে শুরু)"},
+         "params_json": {"type": "string", "description": 'JSON: {"param": "বর্ণনা"} (ঐচ্ছিক)'}},
+        ["name_description", "code"])},
+    "list_plugins": {"func": list_plugins, "declaration": _decl(
+        "list_plugins", "নিজের বানানো custom plugin/feature-দের তালিকা দেখায়।")},
+    "delete_plugin": {"func": delete_plugin, "declaration": _decl(
+        "delete_plugin", "একটা custom plugin মুছে ফেলে।",
+        {"name": {"type": "string", "description": "plugin-এর নাম"}}, ["name"])},
+})
+TOOL_PERMISSION.update({"create_plugin": "code", "delete_plugin": "code"})
+SENSITIVE_TOOLS.add("create_plugin")
+SENSITIVE_TOOLS.add("delete_plugin")
+_PLUGINS_LOADED = load_plugins()
+
+
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  🦸 SUPER TOOLS — ফ্রিগুলো এখনই চলে; paid গুলো key বসালেই     ║
+# ║  চলবে, key না থাকলে agent নিজেই কেনার গাইড দেয়                ║
+# ╚═══════════════════════════════════════════════════════════════╝
+
+def _need_key(env, service, how):
+    return (f"🔑 এই কাজের জন্য {service}-এর key দরকার (এখনো বসানো হয়নি)।\n"
+            f"কীভাবে পাবেন: {how}\n"
+            f"Key পেলে Admin (🔧) → API Keys-এ '{env}' ঘরে বসান — তারপর আমি এই কাজ নিজেই করবো!")
+
+# ── 🌦️ WEATHER (সম্পূর্ণ ফ্রি — key লাগে না) ──
+def get_weather(city):
+    if not str(city).strip():
+        return "Error: শহরের নাম দরকার।"
+    try:
+        g = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                         params={"name": str(city).strip(), "count": 1}, timeout=15).json()
+        if not g.get("results"):
+            return f"'{city}' পাওয়া যায়নি — English বানানে দিন (যেমন Chattogram)।"
+        loc = g["results"][0]
+        w = requests.get("https://api.open-meteo.com/v1/forecast",
+            params={"latitude": loc["latitude"], "longitude": loc["longitude"],
+                    "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
+                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                    "forecast_days": 3, "timezone": "auto"}, timeout=15).json()
+        cur = w.get("current", {})
+        daily = w.get("daily", {})
+        codes = {0:"পরিষ্কার ☀️",1:"মোটামুটি পরিষ্কার 🌤️",2:"আংশিক মেঘলা ⛅",3:"মেঘলা ☁️",
+                 45:"কুয়াশা 🌫️",51:"গুঁড়ি বৃষ্টি 🌦️",61:"হালকা বৃষ্টি 🌧️",63:"বৃষ্টি 🌧️",
+                 65:"ভারী বৃষ্টি ⛈️",80:"বৃষ্টির ঝাপটা 🌧️",95:"বজ্রঝড় ⛈️"}
+        out = [f"🌦️ {loc['name']}, {loc.get('country','')}:",
+               f"🌡️ {cur.get('temperature_2m','?')}°C | 💧 {cur.get('relative_humidity_2m','?')}% | 💨 {cur.get('wind_speed_10m','?')} km/h",
+               f"☁️ {codes.get(cur.get('weather_code'), 'অজানা')}", "আগামী ৩ দিন:"]
+        for i, d in enumerate(daily.get("time", [])[:3]):
+            out.append(f"• {d}: {daily['temperature_2m_min'][i]}–{daily['temperature_2m_max'][i]}°C, বৃষ্টি {daily['precipitation_probability_max'][i]}%")
+        log_activity("tool", f"weather: {city}")
+        return "\n".join(out)
+    except Exception as e:
+        return f"আবহাওয়া আনতে সমস্যা: {e}"
+
+# ── 💱 CURRENCY (সম্পূর্ণ ফ্রি) ──
+def currency_convert(amount, from_currency="USD", to_currency="BDT"):
+    try:
+        amt = float(str(amount).replace(",", ""))
+    except (TypeError, ValueError):
+        return "Error: amount সংখ্যা হতে হবে।"
+    f, t = str(from_currency).upper().strip()[:3], str(to_currency).upper().strip()[:3]
+    try:
+        r = requests.get(f"https://open.er-api.com/v6/latest/{f}", timeout=15).json()
+        if r.get("result") != "success":
+            return f"'{f}' currency পাওয়া যায়নি।"
+        rate = r["rates"].get(t)
+        if not rate:
+            return f"'{t}' currency পাওয়া যায়নি।"
+        log_activity("tool", f"currency {f}->{t}")
+        return f"💱 1 {f} = {rate:,.2f} {t}\n➡️ {amt:,.2f} {f} = {amt*rate:,.2f} {t}"
+    except Exception as e:
+        return f"রেট আনতে সমস্যা: {e}"
+
+# ── 📨 TELEGRAM (ফ্রি token — BotFather) ──
+def send_telegram(chat_id, message="", file_name=""):
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return _need_key("TELEGRAM_BOT_TOKEN", "Telegram Bot",
+                         "Telegram-এ @BotFather → /newbot → ফ্রি token (টাকা লাগে না)")
+    base = f"https://api.telegram.org/bot{token}"
+    try:
+        if str(file_name).strip():
+            p = None
+            for d in (SANDBOX, WORKSPACE):
+                cand = d / Path(file_name).name
+                if cand.exists():
+                    p = cand
+                    break
+            if not p:
+                return f"'{file_name}' ফাইল পাওয়া যায়নি।"
+            with p.open("rb") as fh:
+                r = requests.post(f"{base}/sendDocument", data={"chat_id": str(chat_id)},
+                                  files={"document": fh}, timeout=45)
+        else:
+            if not str(message).strip():
+                return "Error: message বা file_name অন্তত একটা দরকার।"
+            r = requests.post(f"{base}/sendMessage",
+                              json={"chat_id": str(chat_id), "text": str(message)[:4000]}, timeout=30)
+        if r.status_code == 200:
+            log_activity("send", f"telegram → {chat_id}")
+            return "✅ Telegram-এ পাঠানো হয়েছে!"
+        return f"Telegram error: {r.text[:120]}"
+    except Exception as e:
+        return f"পাঠাতে সমস্যা: {e}"
+
+# ── 📧 EMAIL (Resend — দিনে ১০০ ফ্রি) ──
+def send_email(to, subject, body):
+    key = os.environ.get("EMAIL_API_KEY", "")
+    if not key:
+        return _need_key("EMAIL_API_KEY", "Resend Email",
+                         "resend.com-এ ফ্রি sign up → API Keys → Create (দিনে ১০০ email ফ্রি)")
+    if not (str(to).strip() and "@" in str(to)):
+        return "Error: সঠিক email ঠিকানা দরকার।"
+    try:
+        r = requests.post("https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"from": os.environ.get("EMAIL_FROM", "onboarding@resend.dev"),
+                  "to": [str(to).strip()], "subject": str(subject)[:200] or "(no subject)",
+                  "text": str(body)[:10000]}, timeout=30)
+        if r.status_code in (200, 201):
+            log_activity("send", f"email → {to}")
+            return f"✅ Email পাঠানো হয়েছে: {to}"
+        return f"Email error {r.status_code}: {r.text[:120]}"
+    except Exception as e:
+        return f"Email সমস্যা: {e}"
+
+# ── 🚀 DEPLOY WEBSITE (Netlify — ফ্রি token) ──
+def deploy_website(file_name):
+    token = os.environ.get("NETLIFY_TOKEN", "")
+    if not token:
+        return _need_key("NETLIFY_TOKEN", "Netlify (ফ্রি hosting)",
+                         "netlify.com-এ ফ্রি sign up → User settings → Applications → New access token")
+    p = None
+    for d in (SANDBOX, WORKSPACE):
+        cand = d / Path(file_name).name
+        if cand.exists():
+            p = cand
+            break
+    if not p or not p.name.endswith(".html"):
+        return f"'{file_name}' HTML ফাইল পাওয়া যায়নি। আগে build_website দিয়ে বানাও।"
+    try:
+        import zipfile, io
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.write(p, "index.html")
+        r = requests.post("https://api.netlify.com/api/v1/sites",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/zip"},
+            data=buf.getvalue(), timeout=90)
+        if r.status_code in (200, 201):
+            j = r.json()
+            url = j.get("ssl_url") or j.get("url", "")
+            log_activity("deploy", f"netlify: {url}")
+            return f"🚀 Website LIVE হয়ে গেছে!\n🔗 {url}\nযে কেউ এই লিংক খুলতে পারবে!"
+        return f"Netlify error {r.status_code}: {r.text[:120]}"
+    except Exception as e:
+        return f"Deploy সমস্যা: {e}"
+
+# ── 📱 SMS (Twilio — paid) ──
+def send_sms(phone, message):
+    sid = os.environ.get("TWILIO_SID", "")
+    tok = os.environ.get("TWILIO_TOKEN", "")
+    from_no = os.environ.get("TWILIO_FROM", "")
+    if not (sid and tok and from_no):
+        return _need_key("TWILIO_SID + TWILIO_TOKEN + TWILIO_FROM", "Twilio SMS (paid)",
+                         "twilio.com-এ account → SID, Auth Token, Phone number কিনুন (৩টা ঘরেই বসাতে হবে)")
+    try:
+        r = requests.post(f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            auth=(sid, tok),
+            data={"To": str(phone), "From": from_no, "Body": str(message)[:1500]}, timeout=30)
+        if r.status_code in (200, 201):
+            log_activity("send", f"sms → {phone}")
+            return f"✅ SMS পাঠানো হয়েছে: {phone}"
+        return f"SMS error: {r.text[:120]}"
+    except Exception as e:
+        return f"SMS সমস্যা: {e}"
+
+TOOLS.update({
+    "get_weather": {"func": get_weather, "declaration": _decl(
+        "get_weather", "যেকোনো শহরের লাইভ আবহাওয়া + ৩ দিনের পূর্বাভাস (ফ্রি, নির্ভুল)। আবহাওয়ার প্রশ্নে web_search-এর বদলে এটাই ব্যবহার করো।",
+        {"city": {"type": "string", "description": "শহরের নাম English-এ (যেমন Chattogram, Dhaka)"}}, ["city"])},
+    "currency_convert": {"func": currency_convert, "declaration": _decl(
+        "currency_convert", "লাইভ currency রেট + রূপান্তর (ফ্রি)। ডলার/টাকা/রিয়াল প্রশ্নে এটাই ব্যবহার করো।",
+        {"amount": {"type": "number", "description": "কত টাকা/ডলার"},
+         "from_currency": {"type": "string", "description": "কোন currency থেকে (USD/BDT/SAR/EUR...)"},
+         "to_currency": {"type": "string", "description": "কোনটায়"}}, ["amount"])},
+    "send_telegram": {"func": send_telegram, "declaration": _decl(
+        "send_telegram", "Telegram-এ message বা ফাইল পাঠায়। Key না থাকলে user-কে ফ্রি token নেওয়ার গাইড দেয়।",
+        {"chat_id": {"type": "string", "description": "প্রাপকের chat ID"},
+         "message": {"type": "string", "description": "message"},
+         "file_name": {"type": "string", "description": "sandbox-এর ফাইল (ঐচ্ছিক)"}}, ["chat_id"])},
+    "send_email": {"func": send_email, "declaration": _decl(
+        "send_email", "আসল email পাঠায় (Resend, দিনে ১০০ ফ্রি)। Key না থাকলে গাইড দেয়।",
+        {"to": {"type": "string", "description": "প্রাপকের email"},
+         "subject": {"type": "string", "description": "বিষয়"},
+         "body": {"type": "string", "description": "email-এর লেখা"}}, ["to", "subject", "body"])},
+    "deploy_website": {"func": deploy_website, "declaration": _decl(
+        "deploy_website", "বানানো HTML website-কে internet-এ LIVE করে (Netlify ফ্রি)। build_website-এর পরে user চাইলে এটা।",
+        {"file_name": {"type": "string", "description": "sandbox-এর .html ফাইলের নাম"}}, ["file_name"])},
+    "send_sms": {"func": send_sms, "declaration": _decl(
+        "send_sms", "ফোনে SMS পাঠায় (Twilio, paid)। Key না থাকলে কেনার গাইড দেয়।",
+        {"phone": {"type": "string", "description": "নম্বর (+8801... format)"},
+         "message": {"type": "string", "description": "SMS লেখা"}}, ["phone", "message"])},
+})
+TOOL_PERMISSION.update({
+    "get_weather": "web", "currency_convert": "web",
+    "send_telegram": "business", "send_email": "business",
+    "deploy_website": "code", "send_sms": "business",
+})
+SENSITIVE_TOOLS.update({"send_telegram", "send_email", "send_sms", "deploy_website"})
+
+# INTEGRATIONS তালিকা আপডেট (Admin key vault-এ ঘর আসবে)
+INTEGRATIONS.update({
+    "email_resend": {"label": "📧 Resend Email (১০০/দিন ফ্রি)", "env": "EMAIL_API_KEY",
+                     "note": "resend.com → ফ্রি API key"},
+    "netlify": {"label": "🚀 Netlify Deploy (ফ্রি)", "env": "NETLIFY_TOKEN",
+                "note": "netlify.com → access token"},
+    "twilio_sid": {"label": "📱 Twilio SID (paid SMS)", "env": "TWILIO_SID", "note": "twilio.com"},
+    "twilio_token": {"label": "📱 Twilio Token", "env": "TWILIO_TOKEN", "note": "twilio.com"},
+    "twilio_from": {"label": "📱 Twilio নম্বর", "env": "TWILIO_FROM", "note": "+1... নম্বর"},
+})
+
+
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  🛠️ UTILITY TOOLS — QR code, password, converter, export      ║
+# ╚═══════════════════════════════════════════════════════════════╝
+
+def make_qr_code(text, filename="qr"):
+    """QR code বানায় (লিংক/bKash নম্বর/যেকোনো লেখা) — ছবি হিসেবে।"""
+    if not str(text).strip():
+        return "Error: QR-এ কী থাকবে সেটা দরকার (লিংক/নম্বর/লেখা)।"
+    try:
+        import qrcode
+    except ImportError:
+        return "Error: qrcode library নেই (requirements.txt-এ আছে, deploy-এ পাওয়া যাবে)।"
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", Path(filename or "qr").stem)[:30] or "qr"
+    try:
+        img = qrcode.make(str(text).strip()[:1000])
+        fname = f"{name}.png"
+        img.save(str(SANDBOX / fname))
+        log_activity("tool", f"QR: {str(text)[:40]}")
+        return (f"📱 QR code তৈরি!\n📁 নতুন ফাইল তৈরি হয়েছে: {fname} (sandbox ফোল্ডারে)\n"
+                f"ভেতরে আছে: {str(text).strip()[:80]}")
+    except Exception as e:
+        return f"QR বানাতে সমস্যা: {e}"
+
+def generate_password(length="16", count="3"):
+    """শক্তিশালী random password বানায়।"""
+    import secrets, string
+    try:
+        n = max(8, min(64, int(length)))
+        cnt = max(1, min(10, int(count)))
+    except (TypeError, ValueError):
+        n, cnt = 16, 3
+    chars = string.ascii_letters + string.digits + "!@#$%^&*-_+="
+    pws = []
+    for _ in range(cnt):
+        pw = (secrets.choice(string.ascii_uppercase) + secrets.choice(string.ascii_lowercase)
+              + secrets.choice(string.digits) + secrets.choice("!@#$%-_")
+              + "".join(secrets.choice(chars) for _ in range(n - 4)))
+        pws.append("".join(secrets.SystemRandom().sample(pw, len(pw))))
+    return (f"🔐 {cnt}টা শক্তিশালী password ({n} অক্ষর):\n"
+            + "\n".join(f"{i+1}. {p}" for i, p in enumerate(pws))
+            + "\n\n⚠️ নিরাপদ জায়গায় রাখুন — এগুলো আর কোথাও save হয়নি।")
+
+def unit_convert(value, from_unit, to_unit):
+    """একক রূপান্তর: দৈর্ঘ্য/ওজন/তাপমাত্রা/জমি (বাংলাদেশি একক সহ!)।"""
+    try:
+        v = float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return "Error: value সংখ্যা হতে হবে।"
+    f = str(from_unit).lower().strip()
+    t = str(to_unit).lower().strip()
+    # তাপমাত্রা আলাদা
+    temps = {"c": "celsius", "f": "fahrenheit", "celsius": "celsius", "fahrenheit": "fahrenheit"}
+    if f in temps and t in temps:
+        if temps[f] == temps[t]:
+            return f"{v} — একই একক!"
+        r = v * 9 / 5 + 32 if temps[f] == "celsius" else (v - 32) * 5 / 9
+        return f"🌡️ {v}° {temps[f]} = {r:.1f}° {temps[t]}"
+    # মিটারে base (দৈর্ঘ্য), কেজিতে (ওজন), বর্গফুটে (জমি)
+    U = {
+        "km": ("length", 1000), "kilometer": ("length", 1000), "m": ("length", 1), "meter": ("length", 1),
+        "cm": ("length", .01), "mm": ("length", .001), "mile": ("length", 1609.34),
+        "ft": ("length", .3048), "feet": ("length", .3048), "foot": ("length", .3048),
+        "inch": ("length", .0254), "yard": ("length", .9144), "hat": ("length", .4572), "হাত": ("length", .4572),
+        "kg": ("weight", 1), "kilogram": ("weight", 1), "g": ("weight", .001), "gram": ("weight", .001),
+        "lb": ("weight", .4536), "pound": ("weight", .4536), "ton": ("weight", 1000),
+        "mon": ("weight", 37.324), "মণ": ("weight", 37.324), "maund": ("weight", 37.324),
+        "ser": ("weight", .9331), "সের": ("weight", .9331), "tola": ("weight", .011664), "ভরি": ("weight", .011664), "vori": ("weight", .011664),
+        "sqft": ("area", 1), "square feet": ("area", 1), "katha": ("area", 720), "কাঠা": ("area", 720),
+        "bigha": ("area", 14400), "বিঘা": ("area", 14400), "shotok": ("area", 435.6), "শতক": ("area", 435.6),
+        "decimal": ("area", 435.6), "acre": ("area", 43560), "একর": ("area", 43560),
+    }
+    if f not in U or t not in U:
+        return ("Error: একক চিনলাম না। পারি: km/m/cm/ft/inch/mile/হাত | kg/g/মণ/সের/ভরি/lb | "
+                "কাঠা/বিঘা/শতক/একর/sqft | C/F")
+    if U[f][0] != U[t][0]:
+        return f"Error: {f} ({U[f][0]}) আর {t} ({U[t][0]}) ভিন্ন ধরনের একক!"
+    r = v * U[f][1] / U[t][1]
+    return f"📏 {v:,.4g} {from_unit} = {r:,.4g} {to_unit}"
+
+def export_chat(last_n="50"):
+    """কথোপকথনের সারাংশ text ফাইলে save করে (share/print-এর জন্য)।"""
+    try:
+        n = max(5, min(200, int(last_n)))
+    except (TypeError, ValueError):
+        n = 50
+    hist = load_history()
+    lines = [f"═══ {BRAND['name']} — কথোপকথন Export ═══",
+             f"তারিখ: {now_local().strftime('%Y-%m-%d %H:%M')} | শেষ {n}টা message", ""]
+    count = 0
+    for msg in hist[-n*2:]:
+        parts = msg.get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts if "text" in p).strip()
+        if not text:
+            continue
+        text = re.sub(r"^\[[^\]]*\]\s*", "", text)
+        who = "👤 আপনি" if msg.get("role") == "user" else "🤖 Agent"
+        lines.append(f"{who}: {text[:600]}")
+        lines.append("")
+        count += 1
+    if count == 0:
+        return "Export করার মতো কথোপকথন নেই।"
+    fname = f"chat_export_{now_local().strftime('%Y%m%d_%H%M')}.txt"
+    (SANDBOX / fname).write_text("\n".join(lines), encoding="utf-8")
+    log_activity("tool", f"chat export: {count} messages")
+    return f"💾 কথোপকথন export হলো!\n📁 নতুন ফাইল তৈরি হয়েছে: {fname} (sandbox ফোল্ডারে)\n{count}টা message।"
+
+def text_stats(text):
+    """লেখার পরিসংখ্যান: শব্দ, অক্ষর, বাক্য, পড়ার সময়।"""
+    s = str(text).strip()
+    if not s:
+        return "Error: লেখা দরকার।"
+    words = len(re.findall(r"[\w\u0980-\u09FF]+", s))
+    chars = len(s)
+    chars_ns = len(re.sub(r"\s", "", s))
+    sents = max(1, len(re.findall(r"[.!?।]+", s)))
+    read_min = max(1, round(words / 200))
+    return (f"📊 লেখার পরিসংখ্যান:\n• শব্দ: {words:,}\n• অক্ষর: {chars:,} (স্পেস ছাড়া {chars_ns:,})\n"
+            f"• বাক্য: {sents:,}\n• গড় শব্দ/বাক্য: {words/sents:.1f}\n• পড়ার সময়: ~{read_min} মিনিট")
+
+TOOLS.update({
+    "make_qr_code": {"func": make_qr_code, "declaration": _decl(
+        "make_qr_code", "QR code বানায় (লিংক/bKash নম্বর/দোকানের ঠিকানা/যেকোনো লেখা) — ছবি হিসেবে দেখায়। ব্যবসার visiting card/পোস্টারে দারুণ কাজের!",
+        {"text": {"type": "string", "description": "QR-এ যা থাকবে (লিংক/লেখা)"},
+         "filename": {"type": "string", "description": "ফাইলের নাম (English)"}}, ["text"])},
+    "generate_password": {"func": generate_password, "declaration": _decl(
+        "generate_password", "শক্তিশালী random password বানায়।",
+        {"length": {"type": "integer", "description": "কত অক্ষর (৮-৬৪)"},
+         "count": {"type": "integer", "description": "কয়টা (১-১০)"}}, [])},
+    "unit_convert": {"func": unit_convert, "declaration": _decl(
+        "unit_convert", "একক রূপান্তর — বাংলাদেশি একক সহ! কাঠা/বিঘা/শতক/একর, মণ/সের/ভরি, km/ft/inch, C/F।",
+        {"value": {"type": "number", "description": "মান"},
+         "from_unit": {"type": "string", "description": "কোন একক থেকে"},
+         "to_unit": {"type": "string", "description": "কোন এককে"}}, ["value", "from_unit", "to_unit"])},
+    "export_chat": {"func": export_chat, "declaration": _decl(
+        "export_chat", "পুরো কথোপকথন text ফাইলে save করে — share বা রেকর্ড রাখার জন্য।",
+        {"last_n": {"type": "integer", "description": "শেষ কয়টা message (default 50)"}}, [])},
+    "text_stats": {"func": text_stats, "declaration": _decl(
+        "text_stats", "লেখার শব্দ/অক্ষর/বাক্য গোনা + পড়ার সময়। লেখালেখি/assignment-এ কাজের।",
+        {"text": {"type": "string", "description": "যে লেখা বিশ্লেষণ হবে"}}, ["text"])},
+})
+TOOL_PERMISSION.update({
+    "make_qr_code": "code", "export_chat": "files",
+})
+
+
 # ══════════ 🧩 PLUGIN SYSTEM — নিজের tool যোগ করুন! ══════════
 # নিচের মতো ৩ লাইনেই নতুন plugin/tool যোগ করা যায় — agent নিজেই শিখে নেবে:
 #
@@ -2610,44 +3291,47 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#6366f1">
+<meta name="theme-color" content="#7c3aed">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="logo.png">
+<link rel="apple-touch-icon" href="logo.png">
 <title>Sabbir AI Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Hind+Siliguri:wght@400;500;600;700&family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 
 :root {
-  --bg-base:#eef2ff;
-  --blob1:#c7d2fe; --blob2:#fbcfe8; --blob3:#bae6fd;
-  --panel:rgba(255,255,255,.6);
-  --stroke:rgba(255,255,255,.95);
-  --text:#1e293b; --dim:#64748b;
-  --g1:#6366f1; --g2:#8b5cf6; --g3:#ec4899;
-  --bot-bg:rgba(255,255,255,.75); --bot-stroke:rgba(148,163,184,.3);
+  --bg-base:#f3f1fb;
+  --blob1:#ddd3fb; --blob2:#e9e2fd; --blob3:#c4b5fd;
+  --panel:rgba(255,254,255,.65);
+  --stroke:rgba(124,58,237,.18);
+  --text:#1e1440; --dim:#6d6493;
+  --g1:#7c3aed; --g2:#a78bfa; --g3:#6366f1;
+  --bot-bg:rgba(255,255,255,.8); --bot-stroke:rgba(124,58,237,.15);
   --tool-bg:rgba(16,185,129,.1); --tool-stroke:rgba(16,185,129,.3); --tool-text:#059669;
   --err-bg:rgba(239,68,68,.08); --err-stroke:rgba(239,68,68,.3); --err-text:#dc2626;
-  --field:rgba(255,255,255,.8);
-  --glow:0 10px 40px -10px rgba(99,102,241,.5);
-  --card-shadow:0 8px 32px rgba(31,41,90,.1);
-  --chip-bg:rgba(255,255,255,.7);
-  --side-bg:rgba(255,255,255,.5);
+  --field:rgba(255,255,255,.85);
+  --glow:0 10px 40px -10px rgba(124,58,237,.45);
+  --card-shadow:0 8px 32px rgba(60,30,140,.12);
+  --chip-bg:rgba(255,255,255,.75);
+  --side-bg:rgba(252,250,255,.6);
 }
 [data-theme="dark"] {
-  --bg-base:#0b1020;
-  --blob1:#312e81; --blob2:#6b1d43; --blob3:#0e4a68;
-  --panel:rgba(15,22,44,.55);
-  --stroke:rgba(255,255,255,.09);
-  --text:#e2e8f0; --dim:#94a3b8;
-  --bot-bg:rgba(30,41,66,.65); --bot-stroke:rgba(148,163,184,.16);
+  --bg-base:#0d0521;
+  --blob1:#3b1d8f; --blob2:#6d28d9; --blob3:#1e1b4b;
+  --panel:rgba(20,12,45,.6);
+  --stroke:rgba(167,139,250,.18);
+  --text:#ece9fe; --dim:#9d94c8;
+  --bot-bg:rgba(30,20,60,.7); --bot-stroke:rgba(167,139,250,.16);
   --tool-bg:rgba(16,185,129,.09); --tool-stroke:rgba(16,185,129,.25); --tool-text:#34d399;
   --err-bg:rgba(239,68,68,.09); --err-stroke:rgba(239,68,68,.28); --err-text:#f87171;
-  --field:rgba(8,12,26,.65);
-  --glow:0 10px 40px -8px rgba(139,92,246,.45);
-  --card-shadow:0 10px 36px rgba(0,0,0,.4);
-  --chip-bg:rgba(30,41,66,.6);
-  --side-bg:rgba(15,22,44,.45);
+  --field:rgba(13,7,32,.7);
+  --glow:0 10px 45px -8px rgba(139,92,246,.55);
+  --card-shadow:0 10px 36px rgba(0,0,0,.5);
+  --chip-bg:rgba(35,24,70,.65);
+  --side-bg:rgba(18,10,40,.55);
 }
 
 html,body { height:100%; }
@@ -2691,7 +3375,8 @@ header {
 @keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.06); } }
 .title-wrap { flex:1; min-width:0; }
 .title {
-  font-size:18px; font-weight:800; letter-spacing:-.3px;
+  font-size:18px; font-weight:800; letter-spacing:.5px;
+  font-family:'Playfair Display','Hind Siliguri',serif;
   background:linear-gradient(90deg,var(--g1),var(--g2),var(--g3));
   -webkit-background-clip:text; background-clip:text; color:transparent;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -2707,6 +3392,18 @@ header {
                animation:blink 1.6s ease-in-out infinite; }
 .status.ok .dot { background:#10b981; }
 @keyframes blink { 50% { opacity:.35; } }
+#menubtn { display:none; }
+#scrim { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:55;
+  backdrop-filter:blur(2px); }
+#scrim.show { display:block; }
+#quickacts { display:flex; flex-direction:column; gap:2px; margin-top:16px; width:100%; max-width:430px; }
+.qa { display:flex; align-items:center; gap:13px; padding:13px 16px; border-radius:14px;
+  border:none; background:transparent; color:var(--text); font-size:15px; font-family:inherit;
+  cursor:pointer; text-align:left; transition:background .2s ease, transform .15s ease; }
+.qa:hover { background:var(--chip-bg); transform:translateX(3px); }
+.qa .qi { font-size:19px; width:26px; text-align:center; }
+.sidelabel { font-size:10.5px; font-weight:800; color:var(--dim); letter-spacing:1px;
+  padding:10px 14px 3px; text-transform:uppercase; }
 .iconbtn {
   width:40px; height:40px; border-radius:12px; border:1px solid var(--stroke);
   background:var(--chip-bg); color:var(--text); cursor:pointer;
@@ -2789,7 +3486,8 @@ header {
 }
 .hero-badge img { width:100%; height:100%; object-fit:cover; }
 #hero h1 {
-  font-size:clamp(22px,4.5vw,32px); font-weight:800; letter-spacing:-.5px;
+  font-size:clamp(22px,4.5vw,32px); font-weight:800; letter-spacing:.5px;
+  font-family:'Playfair Display','Hind Siliguri',serif;
   background:linear-gradient(90deg,var(--g1),var(--g2),var(--g3));
   -webkit-background-clip:text; background-clip:text; color:transparent;
 }
@@ -2823,6 +3521,7 @@ header {
   background:var(--bot-bg); border:1px solid var(--bot-stroke);
   border-bottom-left-radius:6px;
   backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  white-space:normal;
 }
 .bot-row { display:flex; align-items:flex-end; gap:9px; align-self:flex-start; max-width:82%;
            animation:rise .38s cubic-bezier(.21,1.02,.73,1) both; }
@@ -3033,16 +3732,14 @@ textarea.selfield { resize:vertical; min-height:54px; }
 /* ══════════ RESPONSIVE ══════════ */
 @media (max-width:720px) {
   #shell { flex-direction:column; }
+  #menubtn { display:flex; }
   #sidebar {
-    width:100%; flex-direction:row; padding:8px 10px; gap:6px;
-    overflow-x:auto; overflow-y:hidden; border-right:none;
-    border-bottom:1px solid var(--stroke);
-    scrollbar-width:none;
+    position:fixed; top:0; left:-280px; width:262px; height:100%;
+    flex-direction:column; padding:18px 12px; gap:4px; z-index:60;
+    background:var(--bg-base); border-right:1px solid var(--stroke);
+    transition:left .28s ease; overflow-y:auto;
   }
-  #sidebar::-webkit-scrollbar { display:none; }
-  .nav { padding:8px 13px; font-size:13px; border-radius:11px; flex-shrink:0; }
-  .nav:hover { transform:none; }
-  .side-foot { display:none; }
+  #sidebar.open { left:0; box-shadow:20px 0 60px rgba(0,0,0,.55); }
   header { padding:10px 12px; gap:9px; }
   .subtitle { display:none; }
   .title { font-size:15.5px; }
@@ -3068,7 +3765,11 @@ textarea.selfield { resize:vertical; min-height:54px; }
 <div class="blob" id="blob2"></div>
 <div class="blob" id="blob3"></div>
 
+<div id="scrim" onclick="toggleDrawer(false)"></div>
 <header>
+  <button class="iconbtn" id="menubtn" onclick="toggleDrawer()" title="Menu">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+  </button>
   <div class="logo" id="logobox"><img id="logoimg" src="logo.png" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none';document.getElementById('logobox').textContent=String.fromCodePoint(0x2726)"></div>
   <div class="title-wrap">
     <div class="title" id="brandname">Sabbir AI Agent</div>
@@ -3153,6 +3854,12 @@ textarea.selfield { resize:vertical; min-height:54px; }
         <div class="hero-badge" id="herobadge"><img src="logo.png" alt="" onerror="this.style.display='none';document.getElementById('herobadge').textContent=String.fromCodePoint(0x1F916)"></div>
         <h1 id="herogreet">শুভ দিন 👋</h1>
         <p id="herosub">আজ আপনার জন্য কী করতে পারি?</p>
+        <div id="quickacts">
+          <button class="qa" onclick="qa('image')"><span class="qi">🎨</span><span>ছবি বা logo বানাও</span></button>
+          <button class="qa" onclick="qa('write')"><span class="qi">✍️</span><span>লিখে দাও বা এডিট করো</span></button>
+          <button class="qa" onclick="qa('web')"><span class="qi">🌐</span><span>Web-এ search করো</span></button>
+          <button class="qa" onclick="qa('biz')"><span class="qi">🧾</span><span>Order নাও / হিসাব দেখাও</span></button>
+        </div>
       </div>
     </div>
     <div id="imgpreview"><img id="previmg" src=""><span style="font-size:12px;color:var(--dim)">ছবি যুক্ত — প্রশ্ন লিখে পাঠান</span><button class="xbtn" onclick="clearImage()">✕ বাদ</button></div>
@@ -3312,11 +4019,33 @@ function applyBrand(b) {
   updateHero();
 }
 
-/* ══════════ Sidebar ══════════ */
+/* ══════════ Sidebar (ChatGPT-style drawer) ══════════ */
+function toggleDrawer(force) {
+  const sb = document.getElementById('sidebar');
+  const sc = document.getElementById('scrim');
+  const open = (force !== undefined) ? force : !sb.classList.contains('open');
+  sb.classList.toggle('open', open);
+  sc.classList.toggle('show', open);
+}
+function qa(kind) {
+  const inp = document.getElementById('msginput');
+  if (kind === 'image') { setMode('chat'); inp.value = 'একটা ছবি বানাও: [কীসের ছবি চান লিখুন]'; }
+  else if (kind === 'write') { setMode('chat'); inp.value = 'লিখে দাও: [কী লিখতে হবে]'; }
+  else if (kind === 'web') { setMode('research'); inp.value = ''; }
+  else if (kind === 'biz') { setMode('business'); inp.value = ''; }
+  inp.focus();
+}
 function buildSidebar() {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
+  const labels = {dashboard: '🎛️ প্যানেল', chat: '💬 কথা ও কাজ'};
   Object.keys(MODES).forEach(function(key) {
+    if (labels[key]) {
+      const l = document.createElement('div');
+      l.className = 'sidelabel';
+      l.textContent = labels[key];
+      sb.appendChild(l);
+    }
     const m = MODES[key];
     const b = document.createElement('button');
     b.className = 'nav' + (key === MODE ? ' active' : '');
@@ -3349,14 +4078,15 @@ function setMode(key) {
   document.getElementById('chat').style.display = isPanel ? 'none' : 'flex';
   document.getElementById('chips').style.display = isPanel ? 'none' : 'flex';
   document.getElementById('inputbar').style.display = isPanel ? 'none' : 'flex';
-  if (isDash) { loadDashboard(); return; }
-  if (isCmd) { loadCommand(); return; }
-  if (isCtrl) { loadControl(); return; }
-  if (isSkill) { buildSkills(); return; }
-  if (isAdmin) { loadAdmin(); return; }
+  if (isDash) { toggleDrawer(false); loadDashboard(); return; }
+  if (isCmd) { toggleDrawer(false); loadCommand(); return; }
+  if (isCtrl) { toggleDrawer(false); loadControl(); return; }
+  if (isSkill) { toggleDrawer(false); buildSkills(); return; }
+  if (isAdmin) { toggleDrawer(false); loadAdmin(); return; }
   document.getElementById('msginput').placeholder = MODES[key].placeholder;
   updateHero();
   showChips();
+  toggleDrawer(false);
   document.getElementById('msginput').focus();
 }
 
@@ -3501,16 +4231,27 @@ async function loadAdmin() {
       p.models.forEach(function(mo) {
         opts += '<option value="' + esc(mo) + '"' + (p.active && j.engine.model === mo ? ' selected' : '') + '>' + esc(mo) + '</option>';
       });
+      const delbtn = p.custom ? '<button class="mini danger" data-act="delprovider" data-i="' + esc(p.key) + '">🗑️</button>' : '';
       d.innerHTML = '<div style="display:flex;align-items:center;gap:8px">' +
-        '<span class="ctext"><b>' + esc(p.label) + '</b><br><span style="color:var(--dim);font-size:10.5px">' + esc(p.note) + '</span></span>' +
-        '<span class="badge ' + (p.configured ? 'on' : 'off') + '">' + (p.configured ? 'KEY ✓' : 'KEY নেই') + '</span></div>' +
+        '<span class="ctext"><b>' + esc(p.label) + '</b>' + (p.custom ? ' <span class="badge on">CUSTOM</span>' : '') + '<br><span style="color:var(--dim);font-size:10.5px">' + esc(p.note) + '</span></span>' +
+        '<span class="badge ' + (p.configured ? 'on' : 'off') + '">' + (p.configured ? 'KEY ✓' : 'KEY নেই') + '</span>' + delbtn + '</div>' +
         '<div style="display:flex;gap:6px;margin-top:6px">' +
-        '<select class="selfield" style="margin:0" id="ad_model_' + esc(p.key) + '">' + opts + '</select>' +
-        '<button class="mini' + (p.active ? '' : '') + '" data-act="adminengine" data-i="' + esc(p.key) + '">' +
+        '<input class="minifield" style="flex:1" id="ad_model_' + esc(p.key) + '" value="' + esc(p.active ? j.engine.model : p.models[0]) + '" placeholder="model নাম" list="ml_' + esc(p.key) + '">' +
+        '<datalist id="ml_' + esc(p.key) + '">' + opts + '</datalist>' +
+        '<button class="mini" data-act="adminengine" data-i="' + esc(p.key) + '">' +
         (p.active ? '✓ চালু' : 'ব্যবহার করো') + '</button></div>';
       ec.appendChild(d);
     });
-    ec.innerHTML += '<div class="dempty">Gemini ছাড়া অন্যগুলো Beta — key বসালেই চলবে</div>';
+    // 🚀 ভবিষ্যতের AI যোগ করার form
+    const addp = document.createElement('div');
+    addp.className = 'provrow';
+    addp.innerHTML = '<b style="font-size:12.5px">🚀 নতুন AI যোগ করুন (ভবিষ্যতের যেকোনো model!)</b>' +
+      '<input class="selfield" id="np_label" placeholder="নাম — যেমন: ChatGPT-6">' +
+      '<input class="selfield" id="np_base" placeholder="API URL — যেমন: https://api.openai.com/v1">' +
+      '<input class="selfield" id="np_model" placeholder="Model নাম — যেমন: gpt-6">' +
+      '<button class="mini" data-act="addprovider" style="margin-top:4px">➕ যোগ করো</button>';
+    ec.appendChild(addp);
+    ec.innerHTML += '<div class="dempty">OpenAI-compatible যেকোনো API চলবে (OpenAI/Groq/DeepSeek/Mistral/xAI/Together...)। যোগ করার পর নিচে API Keys-এ key বসান।</div>';
     grid.appendChild(ec);
 
     // ── 🔑 API Keys vault ──
@@ -3527,6 +4268,50 @@ async function loadAdmin() {
     });
     kc.innerHTML += '<div class="dempty">🔐 Key শুধু server-এ থাকে — UI-তে কখনো ফেরত আসে না। খালি রেখে 💾 দিলে key মুছে যায়।</div>';
     grid.appendChild(kc);
+
+    // ── 🎨 Personalize (মোবাইলের মতো!) ──
+    const pz = card('Personalize (থিম ও ছবি)', '🎨', 0.17);
+    pz.innerHTML += '<span class="alabel">🎨 Ready থিম — এক চাপে বদলান</span>';
+    const themes = [
+      ['💜 Purple SaaS', '#7c3aed', '#a78bfa', '#6366f1'],
+      ['💎 Gold Luxury', '#d4af37', '#f0d060', '#b8860b'],
+      ['💚 Emerald', '#059669', '#34d399', '#10b981'],
+      ['🌊 Ocean Blue', '#0284c7', '#38bdf8', '#6366f1'],
+      ['🔥 Sunset', '#ea580c', '#f97316', '#ef4444'],
+      ['🌸 Rose Pink', '#db2777', '#f472b6', '#a78bfa']
+    ];
+    const trow = document.createElement('div');
+    trow.style.cssText = 'display:flex;flex-wrap:wrap;gap:7px;margin:6px 0';
+    themes.forEach(function(t) {
+      const b = document.createElement('button');
+      b.className = 'mini';
+      b.style.cssText = 'background:linear-gradient(135deg,' + t[1] + ',' + t[2] + ');color:#fff;border:none';
+      b.textContent = t[0];
+      b.onclick = async function() {
+        await api('api/admin', {action:'save_brand', brand:{color1:t[1], color2:t[2], color3:t[3]}});
+        const r = document.documentElement.style;
+        r.setProperty('--g1', t[1]); r.setProperty('--g2', t[2]); r.setProperty('--g3', t[3]);
+        notifyUser('🎨', t[0] + ' থিম চালু!');
+      };
+      trow.appendChild(b);
+    });
+    pz.appendChild(trow);
+    pz.innerHTML += '<span class="alabel">🖼️ Profile ছবি / Logo বদলান</span>';
+    pz.appendChild(crow('<input type="file" id="logoup" accept="image/*" style="display:none">' +
+      '<span class="ctext" style="color:var(--dim)">Gallery থেকে ছবি বাছুন (২MB-এর কম)</span>' +
+      '<button class="mini" data-act="uplogo">📤 Upload</button>'));
+    grid.appendChild(pz);
+
+    // ── ⏰ Reminders ──
+    const rem = await api('api/reminders', {action:'list'});
+    const rc = card('Reminders', '⏰', 0.19);
+    (rem.reminders || []).forEach(function(r, i) {
+      rc.appendChild(crow('<span class="ctext">🕐 <b>' + esc(r.when) + '</b><br>' + esc(r.text) + '</span>' +
+        '<button class="mini danger" data-act="delrem" data-i="' + (i+1) + '">🗑️</button>'));
+    });
+    if (!(rem.reminders || []).length) rc.innerHTML += '<div class="dempty">কোনো reminder নেই — chat-এ বলুন: "কালকে ১টায় মনে করিয়ে দিও..."</div>';
+    rc.innerHTML += '<div class="dempty">⚠️ Notification পেতে app-টা browser-এ খোলা থাকতে হবে</div>';
+    grid.appendChild(rc);
 
     // ── ⚙️ System ──
     const sc = card('System Settings', '⚙️', 0.2);
@@ -3568,6 +4353,45 @@ async function adminAction(act, el) {
     const prov = el.getAttribute('data-i');
     const sel = document.getElementById('ad_model_' + prov);
     await api('api/admin', {action:'set_engine', provider: prov, model: sel ? sel.value : ''});
+    loadAdmin();
+  }
+  else if (act === 'addprovider') {
+    const label = document.getElementById('np_label').value.trim();
+    const base = document.getElementById('np_base').value.trim();
+    const model = document.getElementById('np_model').value.trim();
+    if (!label || !base || !model) { alert('তিনটা ঘরই পূরণ করুন!'); return; }
+    const j = await api('api/admin', {action:'add_provider', label:label, base:base, model:model});
+    if (j.error) alert('❌ ' + j.error); else notifyUser('Admin', label + ' যোগ হয়েছে!');
+    loadAdmin();
+  }
+  else if (act === 'delprovider') {
+    if (!confirm('এই provider মুছবেন?')) return;
+    await api('api/admin', {action:'remove_provider', key: el.getAttribute('data-i')});
+    loadAdmin();
+  }
+  else if (act === 'uplogo') {
+    const f = document.getElementById('logoup');
+    f.onchange = function() {
+      const file = f.files[0];
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) { alert('ছবি 2MB-এর কম হতে হবে!'); return; }
+      const rd = new FileReader();
+      rd.onload = async function() {
+        const j = await api('api/logo', {data: rd.result.split(',')[1]});
+        if (j.ok) {
+          document.querySelectorAll('img[src^="logo.png"], #logoimg').forEach(function(im) {
+            im.src = 'logo.png?t=' + Date.now();
+          });
+          notifyUser('🖼️', 'নতুন ছবি বসে গেছে!');
+          alert('✅ নতুন logo/ছবি সেট হয়েছে!');
+        } else alert('❌ ' + (j.error || 'সমস্যা হলো'));
+      };
+      rd.readAsDataURL(file);
+    };
+    f.click();
+  }
+  else if (act === 'delrem') {
+    await api('api/reminders', {action:'delete', number: parseInt(el.getAttribute('data-i'))});
     loadAdmin();
   }
   else if (act === 'adminkey') {
@@ -4055,6 +4879,58 @@ function showHero() {
 }
 
 /* ══════════ Messages ══════════ */
+function renderMd(text) {
+  // regex-free markdown → HTML (Python-embedding-safe)
+  const NL = String.fromCharCode(10);
+  let s = esc(text);
+  // code blocks (```)
+  const parts = s.split('```');
+  if (parts.length > 2) {
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+      if (i % 2 === 1) {
+        out += '<pre style="background:rgba(0,0,0,.25);border:1px solid var(--bot-stroke);border-radius:10px;padding:10px;overflow-x:auto;font-size:12.5px;margin:6px 0">' + parts[i].trim() + '</pre>';
+      } else out += parts[i];
+    }
+    s = out;
+  }
+  // inline code (`)
+  const ic = s.split('`');
+  if (ic.length > 2) {
+    let out = '';
+    for (let i = 0; i < ic.length; i++) {
+      if (i % 2 === 1 && ic[i].indexOf(NL) === -1) {
+        out += '<code style="background:rgba(0,0,0,.22);padding:1px 6px;border-radius:6px;font-size:.92em">' + ic[i] + '</code>';
+      } else out += (i % 2 === 1 ? '`' + ic[i] + '`' : ic[i]);
+    }
+    s = out;
+  }
+  // bold (**)
+  const bp = s.split('**');
+  if (bp.length > 2) {
+    let out = '';
+    for (let i = 0; i < bp.length; i++) {
+      out += (i % 2 === 1 && i < bp.length - (bp.length % 2 === 0 ? 1 : 0)) ? '<b>' + bp[i] + '</b>' : bp[i];
+    }
+    s = out;
+  }
+  // line-ভিত্তিক: heading, list, hr
+  const lines = s.split(NL);
+  const res = [];
+  for (let i = 0; i < lines.length; i++) {
+    let L = lines[i];
+    const t = L.trim();
+    if (t.indexOf('### ') === 0) res.push('<div style="font-weight:800;font-size:1.05em;margin:8px 0 3px;color:var(--g2)">' + t.slice(4) + '</div>');
+    else if (t.indexOf('## ') === 0) res.push('<div style="font-weight:800;font-size:1.1em;margin:9px 0 3px;color:var(--g2)">' + t.slice(3) + '</div>');
+    else if (t.indexOf('# ') === 0) res.push('<div style="font-weight:800;font-size:1.15em;margin:10px 0 4px;color:var(--g2)">' + t.slice(2) + '</div>');
+    else if (t.indexOf('- ') === 0 || t.indexOf('• ') === 0) res.push('<div style="padding-left:14px">• ' + t.slice(2) + '</div>');
+    else if (t.indexOf('* ') === 0) res.push('<div style="padding-left:14px">• ' + t.slice(2) + '</div>');
+    else if (t === '---' || t === '----' || t === '-----') res.push('<hr style="border:none;border-top:1px solid var(--bot-stroke);margin:8px 0">');
+    else if (t === '') res.push('<div style="height:6px"></div>');
+    else res.push('<div>' + L + '</div>');
+  }
+  return res.join('');
+}
 function avatarHTML() {
   return '<img src="logo.png" onerror="this.parentNode.textContent=String.fromCodePoint(0x1F916)">';
 }
@@ -4068,7 +4944,7 @@ function addMsg(text, cls) {
     av.innerHTML = avatarHTML();
     const d = document.createElement('div');
     d.className = 'msg bot';
-    d.textContent = text;
+    d.innerHTML = renderMd(text);
     if (text.length > 20 && 'speechSynthesis' in window) {
       const sp = document.createElement('button');
       sp.className = 'speakbtn';
@@ -4276,6 +5152,34 @@ async function resetChat() {
 buildSidebar();
 updateHero();
 checkStatus();
+
+/* ══════════ ⏰ REMINDER POLLING ══════════ */
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880; g.gain.value = .12;
+    o.start(); o.stop(ctx.currentTime + .45);
+  } catch (e) {}
+}
+async function pollReminders() {
+  try {
+    const j = await api('api/reminders', {action: 'due'});
+    (j.due || []).forEach(function(r) {
+      notifyUser('⏰ Reminder!', r.text);
+      beep();
+      if (navigator.vibrate) navigator.vibrate([250, 100, 250]);
+      hideHero();
+      addMsg('⏰ 🔔 Reminder: ' + r.text + ' (সময়: ' + r.when + ')', 'bot');
+    });
+  } catch (e) {}
+}
+setInterval(pollReminders, 30000);
+setTimeout(pollReminders, 4000);
+if ('Notification' in window && Notification.permission === 'default') {
+  setTimeout(function() { Notification.requestPermission(); }, 6000);
+}
 </script>
 </body>
 </html>"""
@@ -4299,6 +5203,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, HTML_PAGE, "text/html")
+        elif self.path.startswith("/manifest.json"):
+            self._send(200, json.dumps({
+                "name": BRAND["name"], "short_name": BRAND["name"][:12],
+                "start_url": "/", "display": "standalone",
+                "background_color": "#0d0521", "theme_color": "#7c3aed",
+                "icons": [{"src": "/logo.png", "sizes": "512x512", "type": "image/png"}],
+            }), "application/manifest+json")
         elif self.path.startswith("/logo.png"):
             logo = Path(__file__).parent / "logo.png"
             if logo.exists():
@@ -4530,12 +5441,47 @@ class Handler(BaseHTTPRequestHandler):
                     admin_set_engine(body.get("provider", "gemini"), body.get("model", ""))
                 elif action == "set_system":
                     admin_set_system(body.get("max_iterations"))
+                elif action == "add_provider":
+                    ok = admin_add_provider(body.get("label", ""), body.get("base", ""), body.get("model", ""))
+                    if not ok:
+                        self._send(400, json.dumps({"error": "নাম, সঠিক URL (https://...) আর model নাম — তিনটাই দরকার"}, ensure_ascii=False))
+                        return
+                elif action == "remove_provider":
+                    admin_remove_provider(body.get("key", ""))
                 elif action == "set_key":
                     ok = save_runtime_key(body.get("env", ""), body.get("value", ""))
                     if not ok:
                         self._send(400, json.dumps({"error": "অজানা key নাম"}, ensure_ascii=False))
                         return
                 self._send(200, json.dumps(admin_get(), ensure_ascii=False))
+
+            elif self.path.endswith("api/reminders"):
+                body = self._json_body()
+                action = body.get("action", "list")
+                if action == "due":
+                    self._send(200, json.dumps({"due": due_reminders()}, ensure_ascii=False))
+                    return
+                if action == "add":
+                    reminder_tool("add", text=body.get("text", ""), when=body.get("when", ""))
+                elif action == "delete":
+                    reminder_tool("delete", number=body.get("number"))
+                self._send(200, json.dumps(
+                    {"reminders": [r for r in _rem_load() if not r.get("notified")]},
+                    ensure_ascii=False))
+
+            elif self.path.endswith("api/logo"):
+                body = self._json_body()
+                data = body.get("data", "")
+                if not data or len(data) > 3_000_000:
+                    self._send(400, json.dumps({"error": "ছবি নেই বা 2MB-এর বেশি বড়"}, ensure_ascii=False))
+                    return
+                try:
+                    raw = base64.b64decode(data)
+                    (Path(__file__).parent / "logo.png").write_bytes(raw)
+                    log_activity("admin", "নতুন logo/ছবি")
+                    self._send(200, json.dumps({"ok": True}))
+                except Exception as e:
+                    self._send(400, json.dumps({"error": f"ছবি সমস্যা: {e}"}, ensure_ascii=False))
 
             elif self.path.endswith("api/reset"):
                 agent.reset()
